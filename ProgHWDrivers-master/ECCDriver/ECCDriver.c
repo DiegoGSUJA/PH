@@ -38,7 +38,7 @@ static int ECCopen(struct inode *inode, struct file *file) {
 }
 
 /* Cuestión 4: Implementación de ECCread */
-static ssize_t ECCread(struct file *file, char __user *buffer, size_t count, loff_t *f_pos) {
+static ssize_t ECCread1(struct file *file, char __user *buffer, size_t count, loff_t *f_pos) {
     int minor = iminor(file_inode(file));
     
     if (*f_pos >= ECC_devices[minor].length) return 0;
@@ -52,6 +52,63 @@ static ssize_t ECCread(struct file *file, char __user *buffer, size_t count, lof
     *f_pos += count;
     return count;
 }
+
+
+//PROPUESTA EN LECTURA
+static ssize_t ECCread2(struct file *file, char __user *buf, size_t count, loff_t *ppos){
+
+   int minor = iminor(file_inode(file));
+
+   char buffer_trans[BUFFER_SIZE];
+   
+   //Control posicion
+   
+   if (*ppos > 0) return 0;
+   
+   if ( count > BUFFER_SIZE ) count = BUFFER_SIZE;
+   
+   
+   //Procesamos cada caracter y dependiendo de que sea guardamos la cifrada en el otro buffer (contenedor)
+   
+   for ( int i = 0 ; i < count; i++){
+   
+       char c = ECC_devices[minor].buffer[i];
+       
+       if ( c == 'a' || c == 'A') buffer_trans[i] = '4';
+       else if ( c == 'e' || c == 'E') buffer_trans[i] = '3';
+       else if ( c == 'i' || c == 'I') buffer_trans[i] = '2';
+       else if ( c == 'o' || c == 'O') buffer_trans[i] = '1';
+       else if ( c == 'u' || c == 'U') buffer_trans[i] = '0';
+       
+   }
+   
+   
+   if ( copy_to_user(buf,buffer_trans,count)) return -EFAULT;
+   
+   *ppos += count;
+   
+   printk(KERN_INFO "ECCDriver_ Lectura procesada enviada (%zu bytes)\\n",count);
+   
+   return count;
+
+}
+
+static ssize_t ECCread_selector(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
+    // Obtenemos el Minor del archivo que el usuario ha abierto
+    int minor = iminor(file_inode(file));
+
+    // Si el usuario abre el dispositivo 0 (/dev/ecc0), lectura normal
+    if (minor == 0) {
+        return ECCread1(file, buf, count, ppos);
+    } 
+    // Si el usuario abre el dispositivo 1 (/dev/ecc1), lectura cifrada
+    else if (minor == 1) {
+        return ECCread2(file, buf, count, ppos);
+    }
+
+    return -EINVAL; // Error si es cualquier otro minor
+}
+
 
 /* Cuestión 4 y 5: Implementación de ECCwrite con memset */
 static ssize_t ECCwrite(struct file *file, const char __user *buffer, size_t count, loff_t *f_pos) {
@@ -82,7 +139,7 @@ static int ECCrelease(struct inode *inode, struct file *file) {
 static const struct file_operations ECC_fops = {
     .owner = THIS_MODULE,
     .open = ECCopen,
-    .read = ECCread,
+    .read = ECCread_selector,
     .write = ECCwrite,
     .release = ECCrelease,
 };
