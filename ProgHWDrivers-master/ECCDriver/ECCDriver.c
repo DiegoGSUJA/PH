@@ -3,7 +3,7 @@
 
     ECC - Esqueleto de controlador completo
     Noviembre 2018-2022 - Francisco Charte
-    Adaptado por: Diego Gomez Sanchez
+    Adaptado por: Diego Gomez Sanchez y Gabriel Soria Sánchez
 */
 
 #include <linux/module.h>
@@ -15,6 +15,7 @@
 #define DRIVER_NAME  "ECCDriver"
 #define DRIVER_CLASS "ECCDriverClass"
 #define NUM_DEVICES  3  /* Número de dispositivos a crear */
+#define NUM_BUFFERS 2
 #define BUFFER_SIZE  512 /* Tamaño del búfer según la práctica */
 
 /* Estructura de datos global para memoria persistente independiente */
@@ -23,7 +24,7 @@ struct ECC_device_data {
     size_t length;
 };
 
-static struct ECC_device_data ECC_devices[NUM_DEVICES];
+static struct ECC_device_data ECC_devices[NUM_BUFFERS];
 
 static dev_t major_minor = -1;
 static struct cdev ECCcdev[NUM_DEVICES];
@@ -70,17 +71,17 @@ static ssize_t ECCread2(struct file *file, char __user *buf, size_t count, loff_
    
    //Procesamos cada caracter y dependiendo de que sea guardamos la cifrada en el otro buffer (contenedor)
    
-   for ( int i = 0 ; i < count; i++){
-   
-       char c = ECC_devices[minor].buffer[i];
-       
-       if ( c == 'a' || c == 'A') buffer_trans[i] = '4';
-       else if ( c == 'e' || c == 'E') buffer_trans[i] = '3';
-       else if ( c == 'i' || c == 'I') buffer_trans[i] = '2';
-       else if ( c == 'o' || c == 'O') buffer_trans[i] = '1';
-       else if ( c == 'u' || c == 'U') buffer_trans[i] = '0';
-       
-   }
+   for (int i = 0; i < count; i++) {
+    char c = ECC_devices[0].buffer[i];
+    switch (c) {
+        case 'a': case 'A': buffer_trans[i] = '4'; break;
+        case 'e': case 'E': buffer_trans[i] = '3'; break;
+        case 'i': case 'I': buffer_trans[i] = '2'; break;
+        case 'o': case 'O': buffer_trans[i] = '1'; break;
+        case 'u': case 'U': buffer_trans[i] = '0'; break;
+        default:           buffer_trans[i] = c;   break;
+    }
+}
    
    
    if ( copy_to_user(buf,buffer_trans,count)) return -EFAULT;
@@ -91,6 +92,42 @@ static ssize_t ECCread2(struct file *file, char __user *buf, size_t count, loff_
    
    return count;
 
+}
+
+static ssize_t ECCread3(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
+    int i, j;
+    int minor = iminor(file_inode(file));
+    char buffer_binario[BUFFER_SIZE]; // Buffer temporal para el resultado
+    int pos_bin = 0;
+    size_t data_len = ECC_devices[2].length;
+
+    if (*ppos > 0) return 0;
+
+    // Recorremos los caracteres guardados en el dispositivo
+    for (i = 0; i < data_len && pos_bin + 8 < BUFFER_SIZE; i++) {
+        char c = ECC_devices[2].buffer[i];
+        
+        // Extraemos los 8 bits de cada carácter
+        for (j = 7; j >= 0; j--) {
+            if ((c >> j) & 1)
+                buffer_binario[pos_bin++] = '1';
+            else
+                buffer_binario[pos_bin++] = '0';
+        }
+        
+        // Opcional: añadir un espacio entre bytes para que se lea mejor
+        if (pos_bin < BUFFER_SIZE) buffer_binario[pos_bin++] = ' ';
+    }
+
+    // Ajustamos 'count' al tamaño real de lo que hemos generado
+    if (count > pos_bin) count = pos_bin;
+
+    if (copy_to_user(buf, buffer_binario, count)) {
+        return -EFAULT;
+    }
+
+    *ppos += count;
+    return count;
 }
 
 static ssize_t ECCread_selector(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
@@ -104,6 +141,10 @@ static ssize_t ECCread_selector(struct file *file, char __user *buf, size_t coun
     // Si el usuario abre el dispositivo 1 (/dev/ecc1), lectura cifrada
     else if (minor == 1) {
         return ECCread2(file, buf, count, ppos);
+    }
+    
+    else if (minor == 2){
+        return ECCread3(file,buf,count,ppos);
     }
 
     return -EINVAL; // Error si es cualquier otro minor
@@ -146,8 +187,19 @@ static const struct file_operations ECC_fops = {
 
 /* ============ Inicialización del controlador ============= */
 
-static int ECCdev_uevent(const struct device *dev, struct kobj_uevent_env *env) {
-    add_uevent_var(env, "DEVMODE=%#o", 0666);
+static int ECCdev_uevent(const struct device *dev, struct kobj_uevent_env *env)
+{
+    // Obtenemos el número menor del dispositivo que se está creando
+    int minor = MINOR(dev->devt);
+
+    if (minor == 0) {
+    	pr_info("Admin: %i",minor);
+        add_uevent_var(env, "DEVMODE=%#o", 0600); // Solo el dueño (root) puede leer/escribir
+    } else {
+    	pr_info("Normal: %i",minor);
+        add_uevent_var(env, "DEVMODE=%#o", 0666); // Los demás son abiertos para todos
+    }
+
     return 0;
 }
 
@@ -161,12 +213,17 @@ static int __init init_driver(void) {
     }
 
     if((ECCclass = class_create(DRIVER_CLASS)) == NULL) {
+        
         pr_err("Class device registering failed");
         goto error;
     } else
-        ECCclass->dev_uevent = ECCdev_uevent; 
+        ECCclass->dev_uevent = ECCdev_uevent;
 
+    for (i = 0; i < NUM_BUFFERS; i++){
+        ECC_devices[n_device].length = 0;
+    }
     for (n_device = 0; n_device < NUM_DEVICES; n_device++) {
+        
         cdev_init(&ECCcdev[n_device], &ECC_fops);
         id_device = MKDEV(MAJOR(major_minor), MINOR(major_minor) + n_device);
         
@@ -178,8 +235,6 @@ static int __init init_driver(void) {
             goto error;
         }
         
-        // Inicializar longitud de datos
-        ECC_devices[n_device].length = 0;
         pr_info("Device node /dev/%s%d created\n", DRIVER_NAME, n_device);
     }
 
@@ -204,9 +259,9 @@ static void __exit exit_driver(void) {
 }
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Francisco Charte");
+MODULE_AUTHOR("Diego Gomez Sanchez y Gabriel Soria Sánchez");
 MODULE_VERSION("0.2");
-MODULE_DESCRIPTION("Skeleton of a full device driver module - P1 Diego Gomez");
+MODULE_DESCRIPTION(" - P1 Diego Gomez");
 
 module_init(init_driver)
 module_exit(exit_driver)
